@@ -1,0 +1,22 @@
+import numpy as np
+import pandas as pd
+
+def preprocess_data(data, predictor_columns, target_column):
+    """Preprocess the input data by handling missing values and converting to numeric.
+    
+    Args:
+        data: Input DataFrame
+        predictor_columns: List of predictor column names
+        target_column: Name of the target column
+        
+    Returns:
+        Preprocessed DataFrame
+    """
+    # Convert '<NA>' to NaN in the predictor columns
+    data[predictor_columns] = data[predictor_columns].replace('<NA>', np.nan)
+    
+    # Convert non-numeric values to NaN in predictor columns
+    data[predictor_columns] = data[predictor_columns].apply(pd.to_numeric, errors='coerce')
+
+    return data
+
