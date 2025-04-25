@@ -1,0 +1,219 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import (
+    roc_auc_score, confusion_matrix, accuracy_score, f1_score,
+    brier_score_loss
+)
+from sklearn.impute import KNNImputer
+from sklearn.linear_model import LinearRegression
+from sklearn.base import clone
+from sklearn.utils import resample
+from statsmodels.nonparametric.smoothers_lowess import lowess
+from tqdm import tqdm
+
+def evaluate_model_calibration(pipeline, param_grid, X, y, B=200, target_column='target'):
+    """
+    Evaluate model calibration with bootstrap optimism correction and instability metrics.
+    
+    Parameters:
+    -----------
+    pipeline : sklearn Pipeline
+        The modelling pipeline including preprocessing and estimator.
+    param_grid : dict
+        Parameter grid for GridSearchCV.
+    X : pd.DataFrame
+        Predictor variables.
+    y : array-like
+        Target variable.
+    B : int
+        Number of bootstrap iterations.
+    target_column : str
+        Name of the target variable (used in file names).
+    
+    Returns:
+    --------
+    dict
+        Dictionary containing evaluation metrics and plots
+    """
+    N = X.shape[0]
+    prange = np.linspace(0, 1, 100)  # Changed to match second code
+
+    # Run hyperparameter tuning and fit final model
+    grid_search = GridSearchCV(pipeline, param_grid, cv=5, scoring='roc_auc')
+    grid_search.fit(X, y)
+    f_orig = grid_search.best_estimator_
+    f_orig.fit(X, y)
+    print('Best parameters:', grid_search.best_params_)
+
+    # Apparent predictions and metrics
+    yprob = f_orig.predict_proba(X)[:, 1]
+    y_pred = f_orig.predict(X)
+    cal_apparent = lowess(y, yprob, it=0, xvals=prange)
+    c_apparent = roc_auc_score(y, yprob)
+    tn, fp, fn, tp = confusion_matrix(y, y_pred).ravel()
+    
+    sensitivity_apparent = tp / (tp + fn)
+    specificity_apparent = tn / (tn + fp)
+    brier_apparent = brier_score_loss(y, yprob)
+
+    # Impute missing values
+    X_imputed = pd.DataFrame(KNNImputer(n_neighbors=5).fit_transform(X), columns=X.columns)
+
+    # Store metrics across bootstraps
+    preds_orig = f_orig.predict_proba(X_imputed)[:, 1]
+    preds_bootstrap = np.zeros((B, N))
+
+    metrics = {
+        "auc": [],
+        "cal_optimism": [],
+        "c_optimism": [],
+        "sensitivity": [],
+        "specificity": [],
+        "brier": [],
+        "slope": [],
+        "intercept": []
+    }
+
+    yprob_all, y_all = [], []
+
+    for i in tqdm(range(B), desc="Bootstrapping"):
+        Xb, yb = resample(X_imputed, y, replace=True)
+        fb = clone(f_orig)
+        fb.fit(Xb, yb)
+
+        # Predict on bootstrap and original
+        yprob_bs = fb.predict_proba(Xb)[:, 1]
+        yprob_orig = fb.predict_proba(X_imputed)[:, 1]
+        preds_bootstrap[i, :] = yprob_orig
+
+        # AUC
+        c_apparent_bs = roc_auc_score(yb, yprob_bs)
+        c_test = roc_auc_score(y, yprob_orig)
+        metrics["c_optimism"].append(c_apparent_bs - c_test)
+        metrics["auc"].append(c_test)
+
+        # Calibration curve
+        cal_apparent_bs = lowess(yb, yprob_bs, it=0, xvals=prange)
+        cal_test = lowess(y, yprob_orig, it=0, xvals=prange)
+        metrics["cal_optimism"].append(cal_apparent_bs - cal_test)
+
+        # Performance metrics
+        y_pred_bs = fb.predict(Xb)
+        tn_bs, fp_bs, fn_bs, tp_bs = confusion_matrix(yb, y_pred_bs).ravel()
+
+        metrics["sensitivity"].append(tp_bs / (tp_bs + fn_bs))
+        metrics["specificity"].append(tn_bs / (tn_bs + fp_bs))
+        metrics["brier"].append(brier_score_loss(yb, yprob_bs))
+
+        yprob_all.extend(yprob_orig)
+        y_all.extend(y)
+
+    # Calibration slope/intercept on corrected curve
+    cal_corrected = cal_apparent - np.mean(metrics["cal_optimism"], axis=0)
+    slope_corrected = LinearRegression().fit(prange.reshape(-1, 1), cal_corrected).coef_[0]
+    intercept_corrected = LinearRegression().fit(prange.reshape(-1, 1), cal_corrected).intercept_
+
+    metrics["slope"].append(slope_corrected)
+    metrics["intercept"].append(intercept_corrected)
+
+    # Bias-corrected AUC and interval
+    c_corrected = c_apparent - np.mean(metrics["c_optimism"])
+    delta_hat = np.mean(metrics["c_optimism"])
+    c_ci = np.percentile(metrics["auc"], [2.5, 97.5])
+    c_corrected_ci = (c_corrected - delta_hat, c_corrected + delta_hat)
+
+    print(f"\nApparent AUC: {c_apparent:.3f}")
+    print(f"Bias-corrected AUC: {c_corrected:.3f}")
+    print(f"Bootstrap AUC 95% CI: {c_ci}")
+    print(f"Bias estimate: {delta_hat:.4f}")
+    print(f"Location-shifted 95% CI: {c_corrected_ci[0]:.3f} – {c_corrected_ci[1]:.3f}")
+
+    # =============================================
+    # Calibration Plot 
+    # =============================================
+    fig, ax = plt.subplots(figsize=(12, 8), dpi=200)
+    plt.scatter(yprob, y, s=1, alpha=0.4, c='k')
+    plt.plot(prange, cal_apparent, 'red', label='Non-Parametric Estimate')
+    plt.plot([0, 1], [0, 1], 'k--', label='Perfect Calibration')
+    plt.plot(prange, cal_corrected, 'C0', label='Optimism-Corrected Calibration')
+    plt.legend(loc='upper left', prop={'size': 12})
+    plt.title('Calibration Curve')
+    plt.xlabel('Predicted Probabilities', fontsize=14)
+    plt.ylabel('Observed Probabilities', fontsize=14)
+    plt.savefig(f'{target_column}_calibrationcurve.png')
+    plt.close()
+
+    # =============================================
+    # Prediction Instability Plot
+    # =============================================
+    plt.figure(figsize=(10, 6), dpi=300)
+    for i in range(N):
+        # For each patient, plot the 200 predictions (1 for each bootstrap iteration)
+        plt.plot([preds_orig[i]] * B, preds_bootstrap[:, i], 'o', alpha=0.1, color='grey', markersize=2)
+    plt.plot([0, 1], [0, 1], 'k--', label='Perfect Calibration Line', linewidth=1.5)
+    plt.xlabel('Estimated Likelihood from Developed Model', fontsize=14)
+    plt.ylabel('Predicted Probability from Bootstrap Models', fontsize=14)
+    plt.title(f'Prediction Instability Plot (B = {B})', fontsize=16)
+    plt.tight_layout()
+    plt.xlim(0, 1)
+    plt.ylim(0, 1)
+    plt.savefig(f'{target_column}_prediction_instability_plot.png')
+    plt.close()
+
+    # =============================================
+    # Calibration Instability Plot
+    # =============================================
+    plt.figure(figsize=(10, 6), dpi=300)
+
+    # Plot bootstrap calibration curves
+    for b in range(B):
+        cal_boot = lowess(y, preds_bootstrap[b, :], it=0, xvals=prange)
+        plt.plot(prange, cal_boot, 'b-', alpha=0.1, color='darkblue')
+
+    # Plot the original calibration curve
+    cal_orig = lowess(y, preds_orig, it=0, xvals=prange)
+    plt.plot(prange, cal_orig, color='#FF6347', label='Original Model', linestyle='-', linewidth=2.5)
+    plt.plot([0, 1], [0, 1], 'k--', label='Perfect Calibration Line', linewidth=1.5)
+    plt.xlabel('Estimated Likelihood from Original (Red) and Bootstrap (Blue) Models', fontsize=14)
+    plt.ylabel('Observed Likelihood in Original Dataset', fontsize=14)
+    plt.title('Calibration Instability Plot', fontsize=16)
+    plt.xlim(0, 1)
+    plt.ylim(0, 1)
+    plt.tight_layout()
+    plt.savefig(f'{target_column}_calibration_instability_plot.png', bbox_inches='tight')
+    plt.close()
+
+    # =============================================
+    # MAPE Instability Calculation and Plot
+    # =============================================
+    mape_per_individual = np.sum(np.abs(preds_bootstrap - preds_orig), axis=0) / B
+    average_mape = np.sum(np.abs(preds_bootstrap - preds_orig)) / (B * N)
+
+    print(f'\nAverage MAPE: {average_mape:.4f}')
+    print("MAPE per patient (first 10 shown):")
+    for i, mape in enumerate(mape_per_individual[:10]):
+        print(f"Patient {i + 1}: MAPE = {mape:.4f}")
+
+    # Plot MAPE instability
+    plt.figure(figsize=(10, 6), dpi=300)
+    plt.scatter(preds_orig, mape_per_individual, alpha=0.8, label='MAPE per Individual', color='#088f8f')
+    plt.xlabel('Estimated Likelihood from Developed Model', fontsize=14)
+    plt.ylabel('MAPE', fontsize=14)
+    plt.title('MAPE Instability Plot', fontsize=16)
+    plt.xlim(0, 1)
+    plt.ylim(0, 0.2)
+    plt.tight_layout()
+    plt.savefig(f'{target_column}_mape_instability_plot.png', bbox_inches='tight')
+    plt.close()
+
+    return {
+        "auc_corrected": c_corrected,
+        "auc_ci": c_corrected_ci,
+        "metrics_bootstrap": metrics,
+        "average_mape": average_mape,
+        "mape_per_individual": mape_per_individual,
+        "preds_orig": preds_orig,
+        "preds_bootstrap": preds_bootstrap
+    }
