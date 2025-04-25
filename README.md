@@ -55,10 +55,3 @@ The models predict seven key therapy outcomes:
    - Reliable recovery
 
 3. **Functional Impairment** (WSAS ≥10 at endpoint)
-
-## Repository Structure
-
-├── model/
-│ ├── preprocessing.py # Data cleaning and preparation
-│ ├── pipeline.py # Model pipeline construction
-│ └── evaluation.py # Bootstrap validation and performance metrics
