@@ -27,7 +27,7 @@ The models are comprehensively evaluated using the following metrics:
 - **Calibration Metrics**:
   - Calibration slope 
   - Calibration intercept 
-  - Flexible calibration curves (LOWESS)
+  - Calibration curves (LOWESS)
 
 ### 3. Stability Analyses
 - **Prediction Instability**:
