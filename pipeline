@@ -1,28 +1,42 @@
 from sklearn.pipeline import Pipeline
-from sklearn.compose import ColumnTransformer
 from sklearn.impute import KNNImputer
-from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.preprocessing import StandardScaler
+
+class PartialScaler(BaseEstimator, TransformerMixin):
+    """Scales only selected columns, leaves others unchanged."""
+    def __init__(self, scale_columns):
+        self.scale_columns = scale_columns
+        self.scaler = StandardScaler()
+
+    def fit(self, X, y=None):
+        self.cols_ = self.scale_columns
+        self.other_cols_ = [col for col in X.columns if col not in self.cols_]
+        self.scaler.fit(X[self.cols_])
+        return self
+
+    def transform(self, X):
+        X_copy = X.copy()
+        X_copy[self.cols_] = self.scaler.transform(X_copy[self.cols_])
+        return X_copy
 
 def build_pipeline(predictor_columns):
-    """Build the machine learning pipeline with preprocessing and model.
-    
-    Args:
-        predictor_columns: List of predictor column names
-        
-    Returns:
-        Configured sklearn Pipeline
-    """
-    preprocessor = ColumnTransformer(transformers=[
-        ('num', Pipeline([
-            ('imputer', KNNImputer(n_neighbors=5)),
-            ('scaler', StandardScaler())
-        ]), predictor_columns)
-    ])
+    """Build pipeline: scale selected columns, impute all columns, then fit the model."""
+    scale_columns = [
+        "age_at_episode_date_received",  
+        "number_of_previous_referrals",
+        "GAD7_first", "PHQ9_first", "WSAS_first", 
+        "social_phobia_q1", "agoraphobia_q2", "specific_phobia_q3",
+        "imd_decile_2015"
+    ]
     
     pipeline = Pipeline([
-        ('preprocessor', preprocessor),
-        ('model', LogisticRegression(penalty='elasticnet', solver='saga'))
+        ('scaling', PartialScaler(scale_columns=scale_columns)),       # Scale selected columns first
+        ('imputation', KNNImputer(n_neighbors=5)),                     # Then impute all columns
+        ('model', LogisticRegression(penalty='elasticnet', solver='saga')) 
     ])
-
+    
     return pipeline
+
+
